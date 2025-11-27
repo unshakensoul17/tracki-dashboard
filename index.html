@@ -147,6 +147,7 @@
       margin-top: 10px;
       display: flex;
       gap: 8px;
+      flex-wrap: wrap;
     }
 
     .btn {
@@ -157,6 +158,8 @@
       cursor: pointer;
       transition: all 0.2s;
       font-weight: 500;
+      flex: 1;
+      min-width: 70px;
     }
 
     .btn-primary {
@@ -175,6 +178,24 @@
 
     .btn-secondary:hover {
       background: #475569;
+    }
+
+    .btn-danger {
+      background: #ef4444;
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+
+    .btn-success {
+      background: #22c55e;
+      color: white;
+    }
+
+    .btn-success:hover {
+      background: #16a34a;
     }
 
     .map-container {
@@ -334,8 +355,11 @@
       const [loginError, setLoginError] = useState('');
       const [devices, setDevices] = useState([]);
       const [selectedDevice, setSelectedDevice] = useState(null);
+      const [focusedDevice, setFocusedDevice] = useState(null); // For single device view
       const [isConnected, setIsConnected] = useState(false);
       const [showRenameModal, setShowRenameModal] = useState(false);
+      const [showDeleteModal, setShowDeleteModal] = useState(false);
+      const [deviceToDelete, setDeviceToDelete] = useState(null);
       const [newDeviceName, setNewDeviceName] = useState('');
       const [password, setPassword] = useState('');
       
@@ -439,6 +463,27 @@
             markersRef.current[data.deviceId].setPopupContent(
               `<b>${data.deviceName}</b><br>${data.deviceId}`
             );
+          }
+        });
+
+        socket.on('DEVICE_DELETED', (data) => {
+          console.log('Device deleted:', data);
+          
+          // Remove from devices list
+          setDevices(prev => prev.filter(d => d.deviceId !== data.deviceId));
+          
+          // Remove marker from map
+          if (markersRef.current[data.deviceId]) {
+            mapInstanceRef.current.removeLayer(markersRef.current[data.deviceId]);
+            delete markersRef.current[data.deviceId];
+          }
+          
+          // Clear selection if deleted device was selected
+          if (selectedDevice?.deviceId === data.deviceId) {
+            setSelectedDevice(null);
+          }
+          if (focusedDevice?.deviceId === data.deviceId) {
+            setFocusedDevice(null);
           }
         });
 
@@ -547,6 +592,73 @@
         }
       };
 
+      const handleDeleteDevice = async () => {
+        if (!deviceToDelete) return;
+
+        try {
+          const response = await fetch(`${API_URL}/api/device/${deviceToDelete.deviceId}`, {
+            method: 'DELETE',
+            headers: {
+              'Authorization': `Bearer ${ADMIN_PASSWORD}`
+            }
+          });
+
+          if (response.ok) {
+            setShowDeleteModal(false);
+            setDeviceToDelete(null);
+          } else {
+            alert('Failed to delete device');
+          }
+        } catch (error) {
+          console.error('Error deleting device:', error);
+          alert('Error deleting device');
+        }
+      };
+
+      const openDeleteModal = (device) => {
+        setDeviceToDelete(device);
+        setShowDeleteModal(true);
+      };
+
+      const toggleFocusDevice = (device) => {
+        if (focusedDevice?.deviceId === device.deviceId) {
+          // Unfocus - show all devices
+          setFocusedDevice(null);
+          
+          // Show all markers
+          Object.values(markersRef.current).forEach(marker => {
+            marker.setOpacity(1);
+          });
+          
+          // Fit bounds to all devices
+          if (mapInstanceRef.current && Object.keys(markersRef.current).length > 0) {
+            const bounds = L.latLngBounds(
+              Object.values(markersRef.current).map(m => m.getLatLng())
+            );
+            mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50] });
+          }
+        } else {
+          // Focus on this device
+          setFocusedDevice(device);
+          
+          // Hide other markers
+          Object.entries(markersRef.current).forEach(([id, marker]) => {
+            if (id === device.deviceId) {
+              marker.setOpacity(1);
+              if (device.lastLocation) {
+                mapInstanceRef.current.setView(
+                  [device.lastLocation.lat, device.lastLocation.lon],
+                  15
+                );
+                marker.openPopup();
+              }
+            } else {
+              marker.setOpacity(0.2);
+            }
+          });
+        }
+      };
+
       const handleDeviceClick = (device) => {
         setSelectedDevice(device);
         
@@ -644,8 +756,11 @@
               {devices.map(device => (
                 <div
                   key={device.deviceId}
-                  className={`device-item ${selectedDevice?.deviceId === device.deviceId ? 'active' : ''}`}
+                  className={`device-item ${selectedDevice?.deviceId === device.deviceId ? 'active' : ''} ${focusedDevice && focusedDevice.deviceId !== device.deviceId ? 'dimmed' : ''}`}
                   onClick={() => handleDeviceClick(device)}
+                  style={{
+                    opacity: focusedDevice && focusedDevice.deviceId !== device.deviceId ? 0.5 : 1
+                  }}
                 >
                   <div className="device-name">{device.deviceName}</div>
                   <div className="device-id">{device.deviceId}</div>
@@ -681,6 +796,26 @@
                         📍 Maps
                       </button>
                     )}
+                    <button
+                      className={`btn ${focusedDevice?.deviceId === device.deviceId ? 'btn-success' : 'btn-secondary'}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleFocusDevice(device);
+                      }}
+                      title={focusedDevice?.deviceId === device.deviceId ? "Show all devices" : "Focus on this device"}
+                    >
+                      {focusedDevice?.deviceId === device.deviceId ? '👁️ All' : '🎯 Focus'}
+                    </button>
+                    <button
+                      className="btn btn-danger"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openDeleteModal(device);
+                      }}
+                      title="Delete device"
+                    >
+                      🗑️
+                    </button>
                   </div>
                 </div>
               ))}
@@ -731,6 +866,40 @@
                   onClick={handleRenameDevice}
                 >
                   Save
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Delete Confirmation Modal */}
+          <div className={`modal ${showDeleteModal ? 'active' : ''}`}>
+            <div className="modal-content">
+              <h2 className="modal-title">Delete Device</h2>
+              <p style={{marginBottom: '20px', color: '#94a3b8'}}>
+                Are you sure you want to delete <strong>{deviceToDelete?.deviceName}</strong>?
+                <br/><br/>
+                This will permanently remove:
+                <br/>• Device information
+                <br/>• Location history
+                <br/>• All associated data
+                <br/><br/>
+                <span style={{color: '#ef4444'}}>This action cannot be undone.</span>
+              </p>
+              <div className="modal-actions">
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setShowDeleteModal(false);
+                    setDeviceToDelete(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-danger"
+                  onClick={handleDeleteDevice}
+                >
+                  Delete Permanently
                 </button>
               </div>
             </div>
